@@ -1,0 +1,75 @@
+import pandas as pd
+import numpy as np
+
+# Define the file path
+file_path = "ConsolidatedData.csv"
+
+# Load the dataset with tab separation
+df = pd.read_csv(file_path, sep="\t")
+
+# Convert the time column to datetime for easier processing
+df['Time(in seconds)'] = pd.to_datetime(df['Time(in seconds)'], errors='coerce')
+
+# Create a new column for apnea event ranking
+df['apnea_event_rank'] = np.nan
+
+# Identify apnea event blocks
+apnea_blocks = (df['apnea'].notna()).astype(int).diff().ne(0).cumsum()
+df['apnea_event_rank'] = np.where(df['apnea'].notna(), apnea_blocks, np.nan)
+
+# Normalize rank numbering to start from 1 for actual apnea events
+df['apnea_event_rank'] = df['apnea_event_rank'].where(df['apnea'].notna())
+df['apnea_event_rank'] = df['apnea_event_rank'].rank(method='dense').astype('Int64')
+
+# Compute average systolic values for 30s and 60s before apnea event blocks
+df['avg_systolic_last_30s'] = np.nan
+df['avg_systolic_last_60s'] = np.nan
+
+for rank in df['apnea_event_rank'].dropna().unique():
+    apnea_block = df[df['apnea_event_rank'] == rank]
+    first_event_time = apnea_block['Time(in seconds)'].min()
+
+    # Compute 30s and 60s average systolic values before event
+    avg_systolic_30s = df[(df['Time(in seconds)'] >= first_event_time - pd.Timedelta(seconds=30)) & 
+                           (df['Time(in seconds)'] < first_event_time)]['Systolic'].mean()
+    avg_systolic_60s = df[(df['Time(in seconds)'] >= first_event_time - pd.Timedelta(seconds=60)) & 
+                           (df['Time(in seconds)'] < first_event_time)]['Systolic'].mean()
+
+    df.loc[df['apnea_event_rank'] == rank, 'avg_systolic_last_30s'] = avg_systolic_30s
+    df.loc[df['apnea_event_rank'] == rank, 'avg_systolic_last_60s'] = avg_systolic_60s
+
+# Compute rank within each event block, extending 60s after the event ends
+df['rank_within_event_block'] = np.nan
+
+for rank in df['apnea_event_rank'].dropna().unique():
+    apnea_block = df[df['apnea_event_rank'] == rank]
+    first_event_time = apnea_block['Time(in seconds)'].min()
+    last_event_time = apnea_block['Time(in seconds)'].max()
+
+    # Define the end of the window (60s after event ends, but stopping at next event)
+    time_window_end = last_event_time + pd.Timedelta(seconds=60)
+    next_event_time = df[df['apnea_event_rank'] > rank]['Time(in seconds)'].min()
+    if pd.notna(next_event_time) and next_event_time < time_window_end:
+        time_window_end = next_event_time
+
+    event_window = df[(df['Time(in seconds)'] >= first_event_time) & 
+                      (df['Time(in seconds)'] <= time_window_end)]
+
+    df.loc[event_window.index, 'rank_within_event_block'] = range(1, len(event_window) + 1)
+
+    # Extend avg_systolic_last_30s and avg_systolic_last_60s where rank_within_event_block exists
+    df.loc[event_window.index, 'avg_systolic_last_30s'] = df.loc[df['apnea_event_rank'] == rank, 'avg_systolic_last_30s'].iloc[0]
+    df.loc[event_window.index, 'avg_systolic_last_60s'] = df.loc[df['apnea_event_rank'] == rank, 'avg_systolic_last_60s'].iloc[0]
+
+# Extend apnea_event_rank where avg_systolic_last_30s, avg_systolic_last_60s, and rank_within_event_block exist
+df.loc[df['rank_within_event_block'].notna(), 'apnea_event_rank'] = df.loc[df['rank_within_event_block'].notna(), 'apnea_event_rank'].bfill()
+
+# Create apnea_event_rank_extended and fill it for all rows with rank_within_event_block
+df['apnea_event_rank_extended'] = df['apnea_event_rank']
+df.loc[df['rank_within_event_block'].notna(), 'apnea_event_rank_extended'] = df['apnea_event_rank'].bfill()
+
+# Save the updated dataset
+output_file_path = "Updated_ConsolidatedData.csv"
+df.to_csv(output_file_path, index=False)
+
+print(f"Processed file saved as: {output_file_path}")
